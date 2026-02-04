@@ -1,0 +1,1515 @@
+---
+title: "DeepSleepHomeostasisLMM_NLME"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load required packages
+```{r, eval=TRUE, results='hide'}
+library(nlme)
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(kableExtra)
+library(readr)
+library(broom.mixed)
+```
+
+# Data Loading and Preprocessing (Similar to original script)
+```{r}
+# Load datasets
+actlumus_data <- read_csv("C:/Users/danie/Downloads/SleepData/Actlumus.csv")
+GW_data <- read_csv("C:/Users/danie/Downloads/SleepData/GW.csv")
+preprocessed_data <- read_csv("C:/Users/danie/Downloads/SleepData/Preprocessed.csv")
+survey_data <- read_csv("C:/Users/danie/Downloads/SleepData/Survey.csv")
+deep_sleep_first_2_hours <- read_csv("C:/Users/danie/Downloads/SleepData/GW_deep_sleep_2_hours_finalcopy.csv")
+deep_sleep_first_1_hours <- read_csv("C:/Users/danie/Downloads/SleepData/GW_deep_sleep_1_hour_finalcopy.csv")
+deep_sleep_first_half_hours <- read_csv("C:/Users/danie/Downloads/SleepData/GW_deep_sleep_half_hour_finalcopy.csv")
+stroop_data <- read_csv("C:/Users/danie/Downloads/SleepData/stroop_results.csv")
+
+# Check date column formats
+cat("Sample date from actlumus_data:", head(actlumus_data$`Date of Sleep`, 1), "\n")
+cat("Sample date from GW_data:", head(GW_data$`Date of Sleep`, 1), "\n")
+cat("Sample date from preprocessed_data:", head(preprocessed_data$`Date of Sleep`, 1), "\n")
+cat("Sample date from survey_data:", head(survey_data$`Date of Sleep`, 1), "\n")
+
+# Safe date conversion function
+date_formats <- c("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d")
+safe_date_convert <- function(date_col) {
+  # Try automatic conversion
+  result <- tryCatch({
+    as.Date(date_col)
+  }, error = function(e) {
+    # Try specified formats
+    for (format in date_formats) {
+      result <- tryCatch({
+        as.Date(date_col, format = format)
+      }, error = function(e) {
+        NULL
+      })
+      if (!is.null(result) && !all(is.na(result))) {
+        return(result)
+      }
+    }
+    # Return original if all fail
+    return(date_col)
+  })
+  return(result)
+}
+
+# Convert dates in all datasets
+actlumus_data <- actlumus_data %>%
+  mutate(`Date of Sleep` = safe_date_convert(`Date of Sleep`))
+
+GW_data <- GW_data %>%
+  mutate(`Date of Sleep` = safe_date_convert(`Date of Sleep`))
+
+preprocessed_data <- preprocessed_data %>%
+  mutate(`Date of Sleep` = safe_date_convert(`Date of Sleep`))
+
+survey_data <- survey_data %>%
+  mutate(`Date of Sleep` = safe_date_convert(`Date of Sleep`))
+
+deep_sleep_first_2_hours <- deep_sleep_first_2_hours %>%
+  mutate(`Date of Sleep` = safe_date_convert(`Date of Sleep`))
+
+deep_sleep_first_1_hours <- deep_sleep_first_1_hours %>% 
+  mutate(`Date of Sleep` = safe_date_convert(`Date of Sleep`))
+
+deep_sleep_first_half_hours <- deep_sleep_first_half_hours %>%
+  mutate(`Date of Sleep` = safe_date_convert(`Date of Sleep`))
+
+stroop_data <- stroop_data %>%
+  rename(`Date of Sleep` = Date) %>%
+  mutate(`Date of Sleep` = safe_date_convert(`Date of Sleep`))
+
+# Define cohort date ranges
+cohorts <- list(
+  list(start = "2024-03-23", end = "2024-04-07", participants = list(1:7)),
+  list(start = "2024-05-04", end = "2024-05-19", participants = list(8:27)),
+  list(start = "2024-05-25", end = "2024-06-09", participants = list(28:40)),
+  list(start = "2024-06-01", end = "2024-06-16", participants = list(44:55))
+)
+
+# Create date range per participant
+all_dates_by_participant <- tibble()
+
+for (i in 1:length(cohorts)) {
+  cohort <- cohorts[[i]]
+  start_date <- as.Date(cohort$start)
+  end_date <- as.Date(cohort$end)
+  participant_range <- unlist(cohort$participants)
+
+  for (p in participant_range) {
+    dates <- tibble(
+      Participant = p,
+      `Date of Sleep` = seq(start_date, end_date, by = "day")
+    )
+    all_dates_by_participant <- bind_rows(all_dates_by_participant, dates)
+  }
+}
+
+# Process data
+data_actlumus <- actlumus_data %>%
+  select(Participant, `Date of Sleep`, `TST (Without Naps)`, `TST (With Naps)`) %>%
+  mutate(across(`TST (Without Naps)`:`TST (With Naps)`, ~ as.numeric(hms::as_hms(.)) / 3600)) %>%
+  rename(`Actlumus (No Naps)` = `TST (Without Naps)`, `Actlumus (With Naps)` = `TST (With Naps)`)
+
+# Checkpoint 1: First dataset after processing
+write.csv(data_actlumus, "C:/Users/danie/Downloads/SleepData/R_Analysis/checkpoint_r_1_actlumus.csv", row.names = FALSE)
+cat("Checkpoint 1 - Actlumus data size:", nrow(data_actlumus), "rows,", ncol(data_actlumus), "columns\n")
+cat("First few rows of Actlumus data:\n")
+print(head(data_actlumus))
+cat("Date class:", class(data_actlumus$`Date of Sleep`), "\n")
+
+data_GW <- GW_data %>%
+  select(Participant, `Date of Sleep`, `TST (Seconds)`, `Deep Sleep time (Stage 5) (Seconds)`) %>%
+  mutate(`GW (Total Sleep)` = `TST (Seconds)` / 3600, `GW (Deep Sleep)` = `Deep Sleep time (Stage 5) (Seconds)` / 3600) %>%
+  select(-`TST (Seconds)`, -`Deep Sleep time (Stage 5) (Seconds)`)
+
+# Checkpoint 2: GW data after processing
+write.csv(data_GW, "C:/Users/danie/Downloads/SleepData/R_Analysis/checkpoint_r_2_GW.csv", row.names = FALSE)
+cat("Checkpoint 2 - GW data size:", nrow(data_GW), "rows,", ncol(data_GW), "columns\n")
+cat("First few rows of GW data:\n")
+print(head(data_GW))
+cat("Date class:", class(data_GW$`Date of Sleep`), "\n")
+
+data_preprocessed <- preprocessed_data %>%
+  select(Participant, `Date of Sleep`, `Total Sleep Time`) %>%
+  mutate(Preprocessed = as.numeric(hms::as_hms(`Total Sleep Time`)) / 3600) %>%
+  select(-`Total Sleep Time`)
+
+# Checkpoint 3: Preprocessed data after processing
+write.csv(data_preprocessed, "C:/Users/danie/Downloads/SleepData/R_Analysis/checkpoint_r_3_preprocessed.csv", row.names = FALSE)
+cat("Checkpoint 3 - Preprocessed data size:", nrow(data_preprocessed), "rows,", ncol(data_preprocessed), "columns\n")
+cat("First few rows of Preprocessed data:\n")
+print(head(data_preprocessed))
+cat("Date class:", class(data_preprocessed$`Date of Sleep`), "\n")
+
+data_survey <- survey_data %>%
+  select(Participant, `Date of Sleep`, TST) %>%
+  mutate(Survey = as.numeric(hms::as_hms(TST)) / 3600) %>%
+  select(-TST)
+
+# Checkpoint 4: Survey data after processing
+write.csv(data_survey, "C:/Users/danie/Downloads/SleepData/R_Analysis/checkpoint_r_4_survey.csv", row.names = FALSE)
+cat("Checkpoint 4 - Survey data size:", nrow(data_survey), "rows,", ncol(data_survey), "columns\n")
+cat("First few rows of Survey data:\n")
+print(head(data_survey))
+cat("Date class:", class(data_survey$`Date of Sleep`), "\n")
+
+data_ds2h <- deep_sleep_first_2_hours %>%
+  select(Participant, `Date of Sleep`, `TST (Seconds)`, `Deep Sleep in First 2 Hours (Seconds)`) %>%
+  mutate(`Deep Sleep in First 2 Hours` = `Deep Sleep in First 2 Hours (Seconds)` / 3600) %>%
+  select(-`TST (Seconds)`, -`Deep Sleep in First 2 Hours (Seconds)`)
+
+# Checkpoint 5: Deep sleep first 2 hours data after processing
+write.csv(data_ds2h, "C:/Users/danie/Downloads/SleepData/R_Analysis/checkpoint_r_5_ds2h.csv", row.names = FALSE)
+cat("Checkpoint 5 - Deep sleep first 2 hours data size:", nrow(data_ds2h), "rows,", ncol(data_ds2h), "columns\n")
+cat("First few rows of Deep sleep first 2 hours data:\n")
+print(head(data_ds2h))
+cat("Date class:", class(data_ds2h$`Date of Sleep`), "\n")
+
+data_ds1h <- deep_sleep_first_1_hours %>%
+  select(Participant, `Date of Sleep`, `Deep Sleep in First 1 Hour (Seconds)`) %>%
+  mutate(`Deep Sleep in First 1 Hour` = `Deep Sleep in First 1 Hour (Seconds)` / 3600) %>%
+  select(-`Deep Sleep in First 1 Hour (Seconds)`)
+
+data_dshh <- deep_sleep_first_half_hours %>%
+  select(Participant, `Date of Sleep`, `Deep Sleep in First Half Hour (Seconds)`) %>%
+  mutate(`Deep Sleep in First Half Hour` = `Deep Sleep in First Half Hour (Seconds)` / 3600) %>%
+  select(-`Deep Sleep in First Half Hour (Seconds)`)
+
+# Merge all data
+merged_data <- all_dates_by_participant %>%
+  left_join(data_actlumus, by = c("Participant", "Date of Sleep")) %>%
+  left_join(data_GW, by = c("Participant", "Date of Sleep")) %>%
+  left_join(data_preprocessed, by = c("Participant", "Date of Sleep")) %>%
+  left_join(data_survey, by = c("Participant", "Date of Sleep")) %>%
+  left_join(data_ds2h, by = c("Participant", "Date of Sleep")) %>%
+  left_join(data_ds1h, by = c("Participant", "Date of Sleep")) %>%
+  left_join(data_dshh, by = c("Participant", "Date of Sleep")) %>%
+  arrange(Participant, `Date of Sleep`)
+
+# Checkpoint 9: Merged data
+write.csv(merged_data, "C:/Users/danie/Downloads/SleepData/R_Analysis/checkpoint_r_9_merged.csv", row.names = FALSE, na = "")
+cat("Checkpoint 9 - Merged data size:", nrow(merged_data), "rows,", ncol(merged_data), "columns\n")
+cat("First few rows of Merged data:\n")
+print(head(merged_data))
+cat("Date class:", class(merged_data$`Date of Sleep`), "\n")
+cat("Columns in merged_data:", paste(colnames(merged_data), collapse=", "), "\n")
+```
+
+# Median Approach Models with nlme
+
+## Random Slope and Intercept Model (Correlated Random Effects)
+```{r}
+# Prepare data
+data_median <- merged_data %>%
+  group_by(Participant) %>%
+  mutate(
+    AverageTST = rowMeans(select(cur_data(), `Actlumus (No Naps)`, `GW (Total Sleep)`, Preprocessed, Survey), na.rm = TRUE),
+    MedianTST = median(AverageTST, na.rm = TRUE),
+    SleepLoss = MedianTST - AverageTST
+  ) %>%
+  mutate(
+    NextDeepSleep2h = lead(`Deep Sleep in First 2 Hours`),
+    DeepSleepChangeMins = (NextDeepSleep2h - median(`Deep Sleep in First 2 Hours`, na.rm = TRUE)) * 60
+  ) %>%
+  ungroup()
+
+# Filter data
+lmm_data <- data_median %>%
+  filter(!is.na(SleepLoss), !is.na(DeepSleepChangeMins))
+
+# Model 1: Correlated Random Effects
+model1_nlme <- tryCatch({
+  lme(DeepSleepChangeMins ~ SleepLoss, 
+      random = ~ SleepLoss | Participant, 
+      data = lmm_data, 
+      method = "ML")
+}, warning = function(w) {
+  cat("Convergence Warning for model1_nlme:", w$message, "\n")
+  lme(DeepSleepChangeMins ~ SleepLoss, 
+      random = ~ SleepLoss | Participant, 
+      data = lmm_data, 
+      method = "ML")
+}, error = function(e) {
+  cat("Error in model1_nlme:", e$message, "\n")
+  NULL
+})
+
+# Check model validity
+if (!is.null(model1_nlme)) {
+  # Print summary
+  print(summary(model1_nlme))
+
+  # Display model info
+  cat("\nModel Information:\n")
+  cat("AIC:", AIC(model1_nlme), "\n")
+  cat("BIC:", BIC(model1_nlme), "\n")
+  cat("Log-Likelihood:", logLik(model1_nlme), "\n")
+
+  # Extract fixed effects
+  fixed_effects <- summary(model1_nlme)$tTable
+
+  # Format fixed effects table
+  fixed_effects_table <- fixed_effects %>%
+    as.data.frame() %>%
+    mutate(Significance = cut(
+      `p-value`, 
+      breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf), 
+      labels = c("***", "**", "*", ".", " ")
+    )) %>%
+    kable(
+      digits = 4, 
+      format = "html", 
+      caption = "Fixed Effects Table (Model 1: Correlated Random Effects)"
+    ) %>%
+    kable_styling(full_width = FALSE, position = "center")
+
+  print(fixed_effects_table)
+}
+```
+
+## Random Slope and Intercept Model (Uncorrelated Random Effects)
+```{r}
+# Uncorrelated random effects model
+model1_diag_nlme <- tryCatch({
+  lme(DeepSleepChangeMins ~ SleepLoss, 
+      random = list(Participant = pdDiag(~ SleepLoss)), 
+      data = lmm_data, 
+      method = "ML")
+}, warning = function(w) {
+  cat("Convergence Warning for model1_diag_nlme:", w$message, "\n")
+  lme(DeepSleepChangeMins ~ SleepLoss, 
+      random = list(Participant = pdDiag(~ SleepLoss)), 
+      data = lmm_data, 
+      method = "ML")
+}, error = function(e) {
+  cat("Error in model1_diag_nlme:", e$message, "\n")
+  NULL
+})
+
+# Check model validity
+if (!is.null(model1_diag_nlme)) {
+  # Print summary
+  print(summary(model1_diag_nlme))
+
+  # Display model info
+  cat("\nModel Information:\n")
+  cat("AIC:", AIC(model1_diag_nlme), "\n")
+  cat("BIC:", BIC(model1_diag_nlme), "\n")
+  cat("Log-Likelihood:", logLik(model1_diag_nlme), "\n")
+
+  # Extract fixed effects
+  fixed_effects <- summary(model1_diag_nlme)$tTable
+
+  # Format fixed effects table
+  fixed_effects_table <- fixed_effects %>%
+    as.data.frame() %>%
+    mutate(Significance = cut(
+      `p-value`, 
+      breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf), 
+      labels = c("***", "**", "*", ".", " ")
+    )) %>%
+    kable(
+      digits = 4, 
+      format = "html", 
+      caption = "Fixed Effects Table"
+    ) %>%
+    kable_styling(full_width = FALSE, position = "center")
+
+  print(fixed_effects_table)
+}
+```
+
+## Random Slope Only Model
+```{r}
+# Model 1S (Random Slope Only)
+model1_s_nlme <- tryCatch({
+  lme(DeepSleepChangeMins ~ SleepLoss, 
+      random = ~ 0 + SleepLoss | Participant, 
+      data = lmm_data, 
+      method = "ML")
+}, warning = function(w) {
+  cat("Convergence Warning for model1_s_nlme:", w$message, "\n")
+  lme(DeepSleepChangeMins ~ SleepLoss, 
+      random = ~ 0 + SleepLoss | Participant, 
+      data = lmm_data, 
+      method = "ML")
+}, error = function(e) {
+  cat("Error in model1_s_nlme:", e$message, "\n")
+  NULL
+})
+
+# Check model validity
+if (!is.null(model1_s_nlme)) {
+  # Print summary
+  print(summary(model1_s_nlme))
+
+  # Display model info
+  cat("\nModel Information:\n")
+  cat("AIC:", AIC(model1_s_nlme), "\n")
+  cat("BIC:", BIC(model1_s_nlme), "\n")
+  cat("Log-Likelihood:", logLik(model1_s_nlme), "\n")
+
+  # Extract fixed effects
+  fixed_effects <- summary(model1_s_nlme)$tTable
+
+  # Format fixed effects table
+  fixed_effects_table <- fixed_effects %>%
+    as.data.frame() %>%
+    mutate(Significance = cut(
+      `p-value`, 
+      breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf), 
+      labels = c("***", "**", "*", ".", " ")
+    )) %>%
+    kable(
+      digits = 4, 
+      format = "html", 
+      caption = "Fixed Effects Table (Model 1S: Random Slope Only)"
+    ) %>%
+    kable_styling(full_width = FALSE, position = "center")
+
+  print(fixed_effects_table)
+}
+```
+
+## Random Intercept Only Model
+```{r}
+# Model 2: Random Intercept Only
+model2_nlme <- tryCatch({
+  lme(DeepSleepChangeMins ~ SleepLoss, 
+      random = ~ 1 | Participant, 
+      data = lmm_data, 
+      method = "ML")
+}, warning = function(w) {
+  cat("Convergence Warning for model2_nlme:", w$message, "\n")
+  lme(DeepSleepChangeMins ~ SleepLoss, 
+      random = ~ 1 | Participant, 
+      data = lmm_data, 
+      method = "ML")
+}, error = function(e) {
+  cat("Error in model2_nlme:", e$message, "\n")
+  NULL
+})
+
+# Check model validity
+if (!is.null(model2_nlme)) {
+  # Print summary
+  print(summary(model2_nlme))
+
+  # Display model info
+  cat("\nModel Information:\n")
+  cat("AIC:", AIC(model2_nlme), "\n")
+  cat("BIC:", BIC(model2_nlme), "\n")
+  cat("Log-Likelihood:", logLik(model2_nlme), "\n")
+
+  # Extract fixed effects
+  fixed_effects <- summary(model2_nlme)$tTable
+
+  # Format fixed effects table
+  fixed_effects_table <- fixed_effects %>%
+    as.data.frame() %>%
+    mutate(Significance = cut(
+      `p-value`, 
+      breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf), 
+      labels = c("***", "**", "*", ".", " ")
+    )) %>%
+    kable(
+      digits = 4, 
+      format = "html", 
+      caption = "Fixed Effects Table (Model 2: Random Intercept Only)"
+    ) %>%
+    kable_styling(full_width = FALSE, position = "center")
+
+  print(fixed_effects_table)
+}
+```
+
+# Current Night Comparison Models with nlme
+
+## Random Slope and Intercept Model (Correlated Random Effects)
+```{r}
+# Prepare current night data
+data_current <- merged_data %>%
+  group_by(Participant) %>%
+  mutate(
+    AverageTST = rowMeans(select(cur_data(), `Actlumus (No Naps)`, `GW (Total Sleep)`, Preprocessed, Survey), na.rm = TRUE),
+    MedianTST = median(AverageTST, na.rm = TRUE),
+    SleepLoss = MedianTST - AverageTST
+  ) %>%
+  mutate(
+    DeepSleepChangeMins_Current = (lead(`Deep Sleep in First 2 Hours`) - `Deep Sleep in First 2 Hours`) * 60
+  ) %>%
+  ungroup()
+
+# Filter current night data
+lmm_data_current <- data_current %>%
+  filter(!is.na(SleepLoss), !is.na(DeepSleepChangeMins_Current))
+
+# Model 3: Correlated Random Effects for Current Night
+model3_nlme <- tryCatch({
+  lme(DeepSleepChangeMins_Current ~ SleepLoss, 
+      random = ~ SleepLoss | Participant, 
+      data = lmm_data_current, 
+      method = "ML")
+}, warning = function(w) {
+  cat("Convergence Warning for model3_nlme:", w$message, "\n")
+  lme(DeepSleepChangeMins_Current ~ SleepLoss, 
+      random = ~ SleepLoss | Participant, 
+      data = lmm_data_current, 
+      method = "ML")
+}, error = function(e) {
+  cat("Error in model3_nlme:", e$message, "\n")
+  NULL
+})
+
+# Check model validity
+if (!is.null(model3_nlme)) {
+  # Print summary
+  print(summary(model3_nlme))
+
+  # Display model info
+  cat("\nModel Information:\n")
+  cat("AIC:", AIC(model3_nlme), "\n")
+  cat("BIC:", BIC(model3_nlme), "\n")
+  cat("Log-Likelihood:", logLik(model3_nlme), "\n")
+
+  # Extract fixed effects
+  fixed_effects <- summary(model3_nlme)$tTable
+
+  # Format fixed effects table
+  fixed_effects_table <- fixed_effects %>%
+    as.data.frame() %>%
+    mutate(Significance = cut(
+      `p-value`, 
+      breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf), 
+      labels = c("***", "**", "*", ".", " ")
+    )) %>%
+    kable(
+      digits = 4, 
+      format = "html", 
+      caption = "Fixed Effects Table (Model 3: Current Night, Correlated Random Effects)"
+    ) %>%
+    kable_styling(full_width = FALSE, position = "center")
+
+  print(fixed_effects_table)
+}
+```
+
+## Random Slope Only Model (Current Night)
+```{r}
+# Current night: random slope only
+model3_s_nlme <- tryCatch({
+  lme(DeepSleepChangeMins_Current ~ SleepLoss, 
+      random = ~ 0 + SleepLoss | Participant, 
+      data = lmm_data_current, 
+      method = "ML")
+}, warning = function(w) {
+  cat("Convergence Warning for model3_s_nlme:", w$message, "\n")
+  lme(DeepSleepChangeMins_Current ~ SleepLoss, 
+      random = ~ 0 + SleepLoss | Participant, 
+      data = lmm_data_current, 
+      method = "ML")
+}, error = function(e) {
+  cat("Error in model3_s_nlme:", e$message, "\n")
+  NULL
+})
+
+# Check model validity
+if (!is.null(model3_s_nlme)) {
+  # Print summary
+  print(summary(model3_s_nlme))
+
+  # Display model info
+  cat("\nModel Information:\n")
+  cat("AIC:", AIC(model3_s_nlme), "\n")
+  cat("BIC:", BIC(model3_s_nlme), "\n")
+  cat("Log-Likelihood:", logLik(model3_s_nlme), "\n")
+
+  # Extract fixed effects
+  fixed_effects <- summary(model3_s_nlme)$tTable
+
+  # Format fixed effects table
+  fixed_effects_table <- fixed_effects %>%
+    as.data.frame() %>%
+    mutate(Significance = cut(
+      `p-value`, 
+      breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf), 
+      labels = c("***", "**", "*", ".", " ")
+    )) %>%
+    kable(
+      digits = 4, 
+      format = "html", 
+      caption = "Fixed Effects Table (Model 3S: Current Night, Random Slope Only)"
+    ) %>%
+    kable_styling(full_width = FALSE, position = "center")
+
+  print(fixed_effects_table)
+}
+```
+
+## Random Intercept Only Model (Current Night)
+```{r}
+# Current night: random intercept only
+model4_nlme <- tryCatch({
+  lme(DeepSleepChangeMins_Current ~ SleepLoss, 
+      random = ~ 1 | Participant, 
+      data = lmm_data_current, 
+      method = "ML")
+}, warning = function(w) {
+  cat("Convergence Warning for model4_nlme:", w$message, "\n")
+  lme(DeepSleepChangeMins_Current ~ SleepLoss, 
+      random = ~ 1 | Participant, 
+      data = lmm_data_current, 
+      method = "ML")
+}, error = function(e) {
+  cat("Error in model4_nlme:", e$message, "\n")
+  NULL
+})
+
+# Check model validity
+if (!is.null(model4_nlme)) {
+  # Print summary
+  print(summary(model4_nlme))
+
+  # Display model info
+  cat("\nModel Information:\n")
+  cat("AIC:", AIC(model4_nlme), "\n")
+  cat("BIC:", BIC(model4_nlme), "\n")
+  cat("Log-Likelihood:", logLik(model4_nlme), "\n")
+
+  # Extract fixed effects
+  fixed_effects <- summary(model4_nlme)$tTable
+
+  # Format fixed effects table
+  fixed_effects_table <- fixed_effects %>%
+    as.data.frame() %>%
+    mutate(Significance = cut(
+      `p-value`, 
+      breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf), 
+      labels = c("***", "**", "*", ".", " ")
+    )) %>%
+    kable(
+      digits = 4, 
+      format = "html", 
+      caption = "Fixed Effects Table (Model 4: Current Night, Random Intercept Only)"
+    ) %>%
+    kable_styling(full_width = FALSE, position = "center")
+
+  print(fixed_effects_table)
+}
+```
+
+# Additional Model Complexities with Autocorrelation and Variance Structures
+
+## Model with AR(1) Correlation Structure
+```{r}
+# AR(1) with correlated random effects
+model_ar1_nlme <- tryCatch({
+  lme(DeepSleepChangeMins ~ SleepLoss, 
+      random = ~ SleepLoss | Participant, 
+      correlation = corAR1(), 
+      data = lmm_data, 
+      method = "ML")
+}, warning = function(w) {
+  cat("Convergence Warning for model_ar1_nlme:", w$message, "\n")
+  lme(DeepSleepChangeMins ~ SleepLoss, 
+      random = ~ SleepLoss | Participant, 
+      correlation = corAR1(), 
+      data = lmm_data, 
+      method = "ML")
+}, error = function(e) {
+  cat("Error in model_ar1_nlme:", e$message, "\n")
+  NULL
+})
+
+# Check model validity
+if (!is.null(model_ar1_nlme)) {
+  # Print summary
+  print(summary(model_ar1_nlme))
+
+  # Display model info
+  cat("\nModel Information:\n")
+  cat("AIC:", AIC(model_ar1_nlme), "\n")
+  cat("BIC:", BIC(model_ar1_nlme), "\n")
+  cat("Log-Likelihood:", logLik(model_ar1_nlme), "\n")
+
+  # Extract fixed effects
+  fixed_effects <- summary(model_ar1_nlme)$tTable
+
+  # Format fixed effects table
+  fixed_effects_table <- fixed_effects %>%
+    as.data.frame() %>%
+    mutate(Significance = cut(
+      `p-value`, 
+      breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf), 
+      labels = c("***", "**", "*", ".", " ")
+    )) %>%
+    kable(
+      digits = 4, 
+      format = "html", 
+      caption = "Fixed Effects Table (Model with AR(1) Correlation Structure)"
+    ) %>%
+    kable_styling(full_width = FALSE, position = "center")
+
+  print(fixed_effects_table)
+}
+```
+```{r}
+# AR(1) Model 1: Median approach, random slope only
+model_ar1_s_nlme <- tryCatch({
+ lme(DeepSleepChangeMins ~ SleepLoss, 
+     random = ~ 0 + SleepLoss | Participant, 
+     correlation = corAR1(), 
+     data = lmm_data, 
+     method = "ML")
+}, warning = function(w) {
+ cat("Convergence Warning for model_ar1_s_nlme:", w$message, "\n")
+ lme(DeepSleepChangeMins ~ SleepLoss, 
+     random = ~ 0 + SleepLoss | Participant, 
+     correlation = corAR1(), 
+     data = lmm_data, 
+     method = "ML")
+}, error = function(e) {
+ cat("Error in model_ar1_s_nlme:", e$message, "\n")
+ NULL
+})
+
+# Check model validity
+if (!is.null(model_ar1_s_nlme)) {
+ # Print summary
+ print(summary(model_ar1_s_nlme))
+
+ # Display model info
+ cat("\nModel Information:\n")
+ cat("AIC:", AIC(model_ar1_s_nlme), "\n")
+ cat("BIC:", BIC(model_ar1_s_nlme), "\n")
+ cat("Log-Likelihood:", logLik(model_ar1_s_nlme), "\n")
+
+ # Extract fixed effects
+ fixed_effects <- summary(model_ar1_s_nlme)$tTable
+
+ # Format fixed effects table
+ fixed_effects_table <- fixed_effects %>%
+   as.data.frame() %>%
+   mutate(Significance = cut(
+     `p-value`, 
+     breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf), 
+     labels = c("***", "**", "*", ".", " ")
+   )) %>%
+   kable(
+     digits = 4, 
+     format = "html", 
+     caption = "Fixed Effects Table (AR(1) Model - Median, Random Slope Only)"
+   ) %>%
+   kable_styling(full_width = FALSE, position = "center")
+
+ print(fixed_effects_table)
+}
+```
+
+```{r}
+# AR(1) Model 2: Current approach, random slope and intercept
+model_ar1_current_nlme <- tryCatch({
+  lme(DeepSleepChangeMins_Current ~ SleepLoss, 
+      random = ~ SleepLoss | Participant, 
+      correlation = corAR1(), 
+      data = lmm_data_current, 
+      method = "ML")
+}, warning = function(w) {
+  cat("Convergence Warning for model_ar1_current_nlme:", w$message, "\n")
+  lme(DeepSleepChangeMins_Current ~ SleepLoss, 
+      random = ~ SleepLoss | Participant, 
+      correlation = corAR1(), 
+      data = lmm_data_current, 
+      method = "ML")
+}, error = function(e) {
+  cat("Error in model_ar1_current_nlme:", e$message, "\n")
+  NULL
+})
+
+# Check model validity
+if (!is.null(model_ar1_current_nlme)) {
+  # Print summary
+  print(summary(model_ar1_current_nlme))
+
+  # Display model info
+  cat("\nModel Information:\n")
+  cat("AIC:", AIC(model_ar1_current_nlme), "\n")
+  cat("BIC:", BIC(model_ar1_current_nlme), "\n")
+  cat("Log-Likelihood:", logLik(model_ar1_current_nlme), "\n")
+
+  # Extract fixed effects
+  fixed_effects <- summary(model_ar1_current_nlme)$tTable
+
+  # Format fixed effects table
+  fixed_effects_table <- fixed_effects %>%
+    as.data.frame() %>%
+    mutate(Significance = cut(
+      `p-value`, 
+      breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf), 
+      labels = c("***", "**", "*", ".", " ")
+    )) %>%
+    kable(
+      digits = 4, 
+      format = "html", 
+      caption = "Fixed Effects Table (AR(1) Model - Current, Random Slope + Intercept)"
+    ) %>%
+    kable_styling(full_width = FALSE, position = "center")
+
+  print(fixed_effects_table)
+}
+```
+
+```{r}
+# AR(1) Model 3: Current approach, random slope only
+model_ar1_current_s_nlme <- tryCatch({
+  lme(DeepSleepChangeMins_Current ~ SleepLoss, 
+      random = ~ 0 + SleepLoss | Participant, 
+      correlation = corAR1(), 
+      data = lmm_data_current, 
+      method = "ML")
+}, warning = function(w) {
+  cat("Convergence Warning for model_ar1_current_s_nlme:", w$message, "\n")
+  lme(DeepSleepChangeMins_Current ~ SleepLoss, 
+      random = ~ 0 + SleepLoss | Participant, 
+      correlation = corAR1(), 
+      data = lmm_data_current, 
+      method = "ML")
+}, error = function(e) {
+  cat("Error in model_ar1_current_s_nlme:", e$message, "\n")
+  NULL
+})
+
+# Check model validity
+if (!is.null(model_ar1_current_s_nlme)) {
+  # Print summary
+  print(summary(model_ar1_current_s_nlme))
+
+  # Display model info
+  cat("\nModel Information:\n")
+  cat("AIC:", AIC(model_ar1_current_s_nlme), "\n")
+  cat("BIC:", BIC(model_ar1_current_s_nlme), "\n")
+  cat("Log-Likelihood:", logLik(model_ar1_current_s_nlme), "\n")
+
+  # Extract fixed effects
+  fixed_effects <- summary(model_ar1_current_s_nlme)$tTable
+
+  # Format fixed effects table
+  fixed_effects_table <- fixed_effects %>%
+    as.data.frame() %>%
+    mutate(Significance = cut(
+      `p-value`, 
+      breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf), 
+      labels = c("***", "**", "*", ".", " ")
+    )) %>%
+    kable(
+      digits = 4, 
+      format = "html", 
+      caption = "Fixed Effects Table (AR(1) Model - Current, Random Slope Only)"
+    ) %>%
+    kable_styling(full_width = FALSE, position = "center")
+
+  print(fixed_effects_table)
+}
+```
+
+## Heteroscedastic Level-1 Variance by Treatment Group
+```{r}
+# Add treatment group if not already in the data
+lmm_data$treatment <- ifelse(lmm_data$Participant <= median(lmm_data$Participant), "Control", "Treatment")
+
+# Model with variance structure by treatment group
+model_var_nlme <- tryCatch({
+  lme(DeepSleepChangeMins ~ SleepLoss, 
+      random = ~ SleepLoss | Participant, 
+      weights = varIdent(form = ~ 1 | treatment), 
+      data = lmm_data, 
+      method = "ML")
+}, warning = function(w) {
+  cat("Convergence Warning for model_var_nlme:", w$message, "\n")
+  lme(DeepSleepChangeMins ~ SleepLoss, 
+      random = ~ SleepLoss | Participant, 
+      weights = varIdent(form = ~ 1 | treatment), 
+      data = lmm_data, 
+      method = "ML")
+}, error = function(e) {
+  cat("Error in model_var_nlme:", e$message, "\n")
+  NULL
+})
+
+# Check model validity
+if (!is.null(model_var_nlme)) {
+  # Print summary
+  print(summary(model_var_nlme))
+
+  # Display model info
+  cat("\nModel Information:\n")
+  cat("AIC:", AIC(model_var_nlme), "\n")
+  cat("BIC:", BIC(model_var_nlme), "\n")
+  cat("Log-Likelihood:", logLik(model_var_nlme), "\n")
+
+  # Extract fixed effects
+  fixed_effects <- summary(model_var_nlme)$tTable
+
+  # Format fixed effects table
+  fixed_effects_table <- fixed_effects %>%
+    as.data.frame() %>%
+    mutate(Significance = cut(
+      `p-value`, 
+      breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf), 
+      labels = c("***", "**", "*", ".", " ")
+    )) %>%
+    kable(
+      digits = 4, 
+      format = "html", 
+      caption = "Fixed Effects Table (Model with Variance Structure by Treatment Group)"
+    ) %>%
+    kable_styling(full_width = FALSE, position = "center")
+
+  print(fixed_effects_table)
+}
+```
+
+## Heterogeneous AR(1) with Treatment Group Variance
+```{r}
+# Model with heterogeneous AR(1) and treatment group variance
+model_complex_nlme <- tryCatch({
+  lme(DeepSleepChangeMins ~ SleepLoss, 
+      random = ~ SleepLoss | Participant, 
+      correlation = corAR1(), 
+      weights = varIdent(form = ~ 1 | treatment), 
+      data = lmm_data, 
+      method = "ML",
+      control = list(msMaxIter = 1000, msMaxEval = 1000))
+}, warning = function(w) {
+  cat("Convergence Warning for model_complex_nlme:", w$message, "\n")
+  lme(DeepSleepChangeMins ~ SleepLoss, 
+      random = ~ SleepLoss | Participant, 
+      correlation = corAR1(), 
+      weights = varIdent(form = ~ 1 | treatment), 
+      data = lmm_data, 
+      method = "ML",
+      control = list(msMaxIter = 1000, msMaxEval = 1000))
+}, error = function(e) {
+  cat("Error in model_complex_nlme:", e$message, "\n")
+  NULL
+})
+
+# Check model validity
+if (!is.null(model_complex_nlme)) {
+  # Print summary
+  print(summary(model_complex_nlme))
+
+  # Display model info
+  cat("\nModel Information:\n")
+  cat("AIC:", AIC(model_complex_nlme), "\n")
+  cat("BIC:", BIC(model_complex_nlme), "\n")
+  cat("Log-Likelihood:", logLik(model_complex_nlme), "\n")
+
+  # Extract fixed effects
+  fixed_effects <- summary(model_complex_nlme)$tTable
+
+  # Format fixed effects table
+  fixed_effects_table <- fixed_effects %>%
+    as.data.frame() %>%
+    mutate(Significance = cut(
+      `p-value`, 
+      breaks = c(-Inf, 0.001, 0.01, 0.05, 0.1, Inf), 
+      labels = c("***", "**", "*", ".", " ")
+    )) %>%
+    kable(
+      digits = 4, 
+      format = "html", 
+      caption = "Fixed Effects Table (Model with Heterogeneous AR(1) and Treatment Group Variance)"
+    ) %>%
+    kable_styling(full_width = FALSE, position = "center")
+
+  print(fixed_effects_table)
+}
+```
+
+```{r}
+# Create summary text files for all models
+models_list <- list(
+ model0 = model0,
+ model0b = model0b,
+ model1_nlme = model1_nlme,
+ model1_diag_nlme = model1_diag_nlme,
+ model1_s_nlme = model1_s_nlme,
+ model2_nlme = model2_nlme,
+ model3_nlme = model3_nlme,
+ model3_s_nlme = model3_s_nlme,
+ model4_nlme = model4_nlme,
+ model_ar1_nlme = model_ar1_nlme
+)
+
+# Loop through each model and create summary text files
+for (model_name in names(models_list)) {
+ current_model <- models_list[[model_name]]
+
+ # Generate summary
+ model_summary <- summary(current_model)
+
+ # Create file path with '_nlme' added
+ file_path <- paste0("C:/Users/danie/Downloads/SleepData/R_Analysis/r_", model_name, "_summary.txt")
+
+ # Save summary to file
+ sink(file_path)
+ print(model_summary)
+ sink()
+
+ # Print confirmation
+ cat(paste0("Created summary file for ", model_name, " at ", file_path, "\n"))
+}
+```
+
+```{r}
+# Create a more robust function to extract model fit statistics
+extract_model_stats <- function(model, model_name, model_type, approach) {
+  # Check if model is NULL first
+  if (is.null(model)) {
+    warning(paste("Model", model_name, "is NULL - skipping"))
+    return(NULL)
+  }
+
+  # Get the class of the model
+  model_class <- class(model)[1]
+
+  # Print debug information
+  cat("Processing model:", model_name, "- Class:", model_class, "\n")
+
+  # Handle different model types
+  if (model_class == "lm") {
+    # For linear models
+    stats <- c(
+      ModelName = model_name,
+      Approach = approach,
+      Type = model_type,
+      AIC = AIC(model),
+      BIC = BIC(model),
+      logLik = as.numeric(logLik(model)),
+      df = length(coef(model)) + 1  # +1 for residual variance
+    )
+  } else if (model_class == "lme") {
+    # For nlme mixed effect models
+    stats <- c(
+      ModelName = model_name,
+      Approach = approach,
+      Type = model_type,
+      AIC = AIC(model),
+      BIC = BIC(model),
+      logLik = as.numeric(logLik(model)),
+      df = attr(logLik(model), "df")
+    )
+  } else if (model_class %in% c("lmerMod", "glmerMod")) {
+    # For lme4 models (if you have any)
+    stats <- c(
+      ModelName = model_name,
+      Approach = approach,
+      Type = model_type,
+      AIC = AIC(model),
+      BIC = BIC(model),
+      logLik = as.numeric(logLik(model)),
+      df = attr(logLik(model), "df")
+    )
+  } else {
+    # For unsupported model types, print more info and return NULL
+    warning(paste("Unsupported model type for", model_name, "- Class:", model_class))
+    cat("Available methods for this model:\n")
+    print(methods(class = model_class))
+    return(NULL)
+  }
+
+  # Calculate AICc (corrected AIC for small sample sizes) if MuMIn is available
+  tryCatch({
+    if (requireNamespace("MuMIn", quietly = TRUE)) {
+      stats["AICc"] <- MuMIn::AICc(model)
+    } else {
+      # Calculate AICc manually if MuMIn is not available
+      n <- nobs(model)  # number of observations
+      k <- stats[["df"]]  # number of parameters
+      stats["AICc"] <- as.numeric(stats[["AIC"]]) + (2 * k * (k + 1)) / (n - k - 1)
+    }
+  }, error = function(e) {
+    warning(paste("Could not calculate AICc for", model_name, ":", e$message))
+    stats["AICc"] <- NA
+  })
+
+  return(stats)
+}
+
+# First, let's check which models exist and their classes
+cat("Checking model objects:\n")
+model_objects <- c("model0", "model0b", "model1_nlme", "model1_diag_nlme", 
+                  "model1_s_nlme", "model2_nlme", "model3_nlme", 
+                  "model3_s_nlme", "model4_nlme", "model_ar1_nlme")
+
+for (obj_name in model_objects) {
+  if (exists(obj_name)) {
+    obj <- get(obj_name)
+    if (is.null(obj)) {
+      cat(obj_name, ": NULL\n")
+    } else {
+      cat(obj_name, ": Class =", class(obj)[1], "\n")
+    }
+  } else {
+    cat(obj_name, ": Does not exist\n")
+  }
+}
+
+# Define the models with their types and approaches (only include existing models)
+model_list <- list()
+
+# Add models only if they exist and are not NULL
+if (exists("model0") && !is.null(model0)) {
+  model_list <- append(model_list, list(list(model = model0, name = "model0", type = "lm", approach = "median")))
+}
+if (exists("model0b") && !is.null(model0b)) {
+  model_list <- append(model_list, list(list(model = model0b, name = "model0b", type = "lm", approach = "current")))
+}
+if (exists("model1_nlme") && !is.null(model1_nlme)) {
+  model_list <- append(model_list, list(list(model = model1_nlme, name = "model1_nlme", type = "nlme (slope+int)", approach = "median")))
+}
+if (exists("model1_diag_nlme") && !is.null(model1_diag_nlme)) {
+  model_list <- append(model_list, list(list(model = model1_diag_nlme, name = "model1_diag_nlme", type = "nlme (uncorr slope+int)", approach = "median")))
+}
+if (exists("model1_s_nlme") && !is.null(model1_s_nlme)) {
+  model_list <- append(model_list, list(list(model = model1_s_nlme, name = "model1_s_nlme", type = "nlme (slope only)", approach = "median")))
+}
+if (exists("model2_nlme") && !is.null(model2_nlme)) {
+  model_list <- append(model_list, list(list(model = model2_nlme, name = "model2_nlme", type = "nlme (int only)", approach = "median")))
+}
+if (exists("model3_nlme") && !is.null(model3_nlme)) {
+  model_list <- append(model_list, list(list(model = model3_nlme, name = "model3_nlme", type = "nlme (slope+int)", approach = "current")))
+}
+if (exists("model3_s_nlme") && !is.null(model3_s_nlme)) {
+  model_list <- append(model_list, list(list(model = model3_s_nlme, name = "model3_s_nlme", type = "nlme (slope only)", approach = "current")))
+}
+if (exists("model4_nlme") && !is.null(model4_nlme)) {
+  model_list <- append(model_list, list(list(model = model4_nlme, name = "model4_nlme", type = "nlme (int only)", approach = "current")))
+}
+if (exists("model_ar1_nlme") && !is.null(model_ar1_nlme)) {
+  model_list <- append(model_list, list(list(model = model_ar1_nlme, name = "model_ar1_nlme", type = "nlme (slope+int+AR1)", approach = "median")))
+}
+
+cat("\nNumber of models to process:", length(model_list), "\n")
+
+# Extract stats for all models
+model_stats <- list()
+for (i in 1:length(model_list)) {
+  m <- model_list[[i]]
+  stats <- extract_model_stats(m$model, m$name, m$type, m$approach)
+  if (!is.null(stats)) {
+    model_stats[[length(model_stats) + 1]] <- stats
+  }
+}
+
+```
+
+```{r}
+# List of model comparisons to perform
+comparisons <- list(
+  # Compare full model (model1_nlme) with reduced models for data_median
+  list(full = model1_nlme, reduced = model2_nlme, description = "Random Slope+Intercept vs. Random Intercept Only (Median)"),
+  list(full = model1_nlme, reduced = model1_s_nlme, description = "Random Slope+Intercept vs. Random Slope Only (Median)"),
+
+  # Compare the two simplified models for data_median
+  list(full = model2_nlme, reduced = model1_s_nlme, description = "Random Intercept Only vs. Random Slope Only (Median)"),
+
+  # Compare full model (model3_nlme) with reduced models for data_current
+  list(full = model3_nlme, reduced = model4_nlme, description = "Random Slope+Intercept vs. Random Intercept Only (Current)"),
+  list(full = model3_nlme, reduced = model3_s_nlme, description = "Random Slope+Intercept vs. Random Slope Only (Current)"),
+
+  # Compare the two simplified models for data_current
+  list(full = model4_nlme, reduced = model3_s_nlme, description = "Random Intercept Only vs. Random Slope Only (Current)"),
+
+  # Compare AR(1) model with basic model
+  list(full = model_ar1_nlme, reduced = model1_nlme, description = "AR(1) Model vs. Basic Random Slope+Intercept (Median)")
+)
+
+# Function to extract key statistics from anova comparison
+extract_anova_stats <- function(comparison_result, description) {
+  # Extract key stats from the anova output - with full model first, reduced second
+  stats <- data.frame(
+    Comparison = description,
+    ChiSquare = comparison_result$Chisq[2],
+    Df = comparison_result$Df[2],
+    p_value = comparison_result$`Pr(>Chisq)`[2],
+    AIC_full = comparison_result$AIC[1],
+    AIC_reduced = comparison_result$AIC[2],
+    BIC_full = comparison_result$BIC[1],
+    BIC_reduced = comparison_result$BIC[2],
+    logLik_full = comparison_result$logLik[1],
+    logLik_reduced = comparison_result$logLik[2],
+    stringsAsFactors = FALSE
+  )
+
+  return(stats)
+}
+
+# Perform likelihood ratio tests and collect results
+results_list <- list()
+
+for (i in 1:length(comparisons)) {
+  comp <- comparisons[[i]]
+
+  tryCatch({
+    # Perform likelihood ratio test with full model first, then reduced model
+    comparison_result <- anova(comp$reduced, comp$full)
+
+    # Extract and store statistics
+    stats <- extract_anova_stats(comparison_result, comp$description)
+    results_list[[i]] <- stats
+
+    # Print raw anova output for reference
+    cat("\nLikelihood Ratio Test:", comp$description, "\n")
+    print(comparison_result)
+    cat("\n")
+
+  }, error = function(e) {
+    cat("Error in comparison", i, ":", comp$description, "\n")
+    cat("Error message:", conditionMessage(e), "\n\n")
+
+    # Create an empty result with error message
+    results_list[[i]] <<- data.frame(
+      Comparison = paste0(comp$description, " (ERROR)"),
+      ChiSquare = NA,
+      Df = NA,
+      p_value = NA,
+      AIC_full = NA,
+      AIC_reduced = NA,
+      BIC_full = NA,
+      BIC_reduced = NA,
+      logLik_full = NA,
+      logLik_reduced = NA,
+      stringsAsFactors = FALSE
+    )
+  })
+}
+
+# Combine all results
+all_results <- do.call(rbind, results_list)
+
+# Create a formatted table for display
+formatted_table <- all_results %>%
+  mutate(
+    ChiSquare = round(ChiSquare, 2),
+    p_value = format.pval(p_value, digits = 3),
+    AIC_diff = round(AIC_reduced - AIC_full, 2),
+    BIC_diff = round(BIC_reduced - BIC_full, 2),
+    logLik_diff = round(logLik_full - logLik_reduced, 2)
+  ) %>%
+  select(Comparison, ChiSquare, Df, p_value, AIC_diff, BIC_diff, logLik_diff) %>%
+  kable(
+    format = "html",
+    caption = "Likelihood Ratio Tests Between Nested Models",
+    col.names = c("Model Comparison", "χ²", "df", "p-value", "ΔAIC", "ΔBIC", "ΔLogLik"),
+    align = c("l", "r", "r", "r", "r", "r", "r")
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE,
+    position = "center"
+  ) %>%
+  add_header_above(c(" " = 4, "Differences (Reduced - Full)" = 3)) %>%
+  footnote(
+    general = "Positive ΔAIC and ΔBIC values indicate the full model is preferred. Positive ΔLogLik values indicate improved fit with the full model.",
+    general_title = "Note: "
+  )
+
+# Display the table
+formatted_table
+
+# Create a more detailed interpretation table
+significance_levels <- c("***" = 0.001, "**" = 0.01, "*" = 0.05, "." = 0.1, "ns" = 1)
+
+interpretation_table <- all_results %>%
+  mutate(
+    # Add significance stars
+    significance = sapply(p_value, function(p) {
+      if (is.na(p)) return("")
+      if (p >= 1) return("")
+      names(significance_levels)[which(p < significance_levels)[1]]
+    }),
+
+    # Format p-values
+    p_formatted = format.pval(p_value, digits = 3),
+
+    # Calculate AIC and BIC differences with signs indicating preference
+    AIC_diff = round(AIC_reduced - AIC_full, 2),
+    BIC_diff = round(BIC_reduced - BIC_full, 2),
+
+    # Add textual interpretation
+    Interpretation = case_when(
+      is.na(p_value) ~ "Test failed",
+      p_value < 0.05 & AIC_diff > 0 ~ "Full model significantly better",
+      p_value < 0.05 & AIC_diff <= 0 ~ "Contradictory results (significant p but AIC favors reduced)",
+      p_value >= 0.05 & AIC_diff > 0 ~ "Mixed evidence (non-significant p but AIC favors full)",
+      p_value >= 0.05 & AIC_diff <= 0 ~ "Reduced model preferred (more parsimonious)"
+    ),
+
+    # Format the test statistic with significance
+    test_stat = paste0("χ²(", Df, ") = ", round(ChiSquare, 2), significance)
+  ) %>%
+  select(Comparison, test_stat, p_formatted, AIC_diff, BIC_diff, Interpretation) %>%
+  kable(
+    format = "html",
+    caption = "Detailed Interpretation of Likelihood Ratio Tests",
+    col.names = c("Model Comparison", "Test Statistic", "p-value", "ΔAIC", "ΔBIC", "Interpretation"),
+    align = c("l", "r", "r", "r", "r", "l")
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE,
+    position = "center"
+  ) 
+
+# Display the interpretation table
+interpretation_table
+
+# Save the results with '_nlme' added
+write.csv(all_results, "C:/Users/danie/Downloads/SleepData/R_Analysis/likelihood_ratio_test_results_nlme.csv", row.names = FALSE)
+```
+
+```{r}
+# Create list of all models for consistent visualization
+models <- list(
+  # Add model0 and model0b to the list
+  model0 = list(model = model0, dataset = lm_data, y_var = "DeepSleepChangeMins", type = "lm"),
+  model0b = list(model = model0b, dataset = lm_data_current, y_var = "Deep Sleep Change (mins)", type = "lm"),
+
+  # NLME models
+  model1_nlme = list(model = model1_nlme, dataset = lmm_data, y_var = "DeepSleepChangeMins", type = "nlme"),
+  model1_diag_nlme = list(model = model1_diag_nlme, dataset = lmm_data, y_var = "DeepSleepChangeMins", type = "nlme"),
+  model1_s_nlme = list(model = model1_s_nlme, dataset = lmm_data, y_var = "DeepSleepChangeMins", type = "nlme"),
+  model2_nlme = list(model = model2_nlme, dataset = lmm_data, y_var = "DeepSleepChangeMins", type = "nlme"),
+
+  model3_nlme = list(model = model3_nlme, dataset = lmm_data_current, y_var = "Deep Sleep Change (mins)", type = "nlme"),
+  model3_s_nlme = list(model = model3_s_nlme, dataset = lmm_data_current, y_var = "Deep Sleep Change (mins)", type = "nlme"),
+  model4_nlme = list(model = model4_nlme, dataset = lmm_data_current, y_var = "Deep Sleep Change (mins)", type = "nlme"),
+
+  # AR(1) model
+  model_ar1_nlme = list(model = model_ar1_nlme, dataset = lmm_data, y_var = "DeepSleepChangeMins", type = "nlme")
+)
+
+# Loop over each model
+for (model_name in names(models)) {
+
+  # Extract model and dataset
+  model_info <- models[[model_name]]
+  model_used <- model_info$model
+  plot_data <- model_info$dataset
+  y_var <- model_info$y_var
+  model_type <- model_info$type
+
+  # Create a proper filename that preserves the full model name including any suffix
+  filename_base <- model_name  # Use the full model name instead of just the number
+
+  # Make sure Participant is character
+  plot_data <- plot_data %>%
+    mutate(Participant = as.character(Participant))
+
+  # Extract fixed effects (coefficients)
+  if (model_type == "lm") {
+    # For regular linear models
+    fixed_effects <- coef(model_used)
+    random_effects_df <- data.frame(Participant = unique(plot_data$Participant))
+    random_effects_df$ran_intercept <- 0
+    random_effects_df$ran_slope <- 0
+  } else {
+    # NLME models
+    fixed_effects <- fixef(model_used)
+
+    # Extract NLME random effects
+    random_effects_raw <- model_used$modelStruct$reStruct$Participant
+
+    # Prepare random effects
+    random_effects_df <- data.frame(
+      Participant = rownames(random_effects_raw),
+      ran_intercept = random_effects_raw[, "(Intercept)"],
+      ran_slope = if(ncol(random_effects_raw) > 1) random_effects_raw[, "SleepLoss"] else 0
+    )
+  }
+
+  # Merge random effects
+  plot_data <- plot_data %>%
+    left_join(random_effects_df, by = "Participant")
+
+  # Calculate predictions
+  if (model_type == "lm") {
+    # Linear models: same predictions
+    plot_data <- plot_data %>%
+      mutate(predicted = fixed_effects[1] + fixed_effects[2] * SleepLoss)
+  } else {
+    # NLME models
+    if (model_name %in% c("model1_s_nlme", "model3_s_nlme")) {
+      # Random slope only: no intercept
+      plot_data <- plot_data %>%
+        mutate(predicted = fixed_effects[1] + (fixed_effects[2] + ran_slope) * SleepLoss)
+    } else {
+      plot_data <- plot_data %>%
+        mutate(predicted = (fixed_effects[1] + ran_intercept) +
+                         (fixed_effects[2] + ran_slope) * SleepLoss)
+    }
+  }
+
+  # Set model subtitle
+  if (model_type == "lm") {
+    model_subtitle <- "Fixed Effects Only (Linear Model)"
+  } else if (model_name %in% c("model1_s_nlme", "model3_s_nlme")) {
+    model_subtitle <- "Random Slope Only"
+  } else if (model_name %in% c("model2_nlme", "model4_nlme")) {
+    model_subtitle <- "Random Intercept Only"
+  } else if (model_name == "model_ar1_nlme") {
+    model_subtitle <- "Random Slope & Intercept + AR(1) Correlation"
+  } else {
+    model_subtitle <- "Random Slope & Intercept"
+  }
+
+  # Create static plot
+  p <- ggplot(plot_data, aes(x = SleepLoss, color = Participant)) +
+    geom_point(aes(y = !!sym(y_var)), size = 2, alpha = 0.7) +
+    geom_line(aes(y = predicted, group = Participant), size = 1) +
+    geom_abline(intercept = fixed_effects[1], slope = fixed_effects[2],
+                color = "black", linetype = "dashed", size = 1.2) +
+    labs(title = paste0("Participant-Specific Model Fits (", model_name, ")"),
+         subtitle = model_subtitle,
+         x = "Sleep Loss (hrs)",
+         y = "Change in Deep Sleep (mins)") +
+    theme_minimal() +
+    scale_color_viridis_d()
+
+  # Save static plot
+  ggsave(paste0("C:/Users/danie/Downloads/SleepData/R_Analysis/participant_fits_", filename_base, ".png"), 
+         p, width = 10, height = 6)
+
+  # Create interactive plotly version
+  # Add population average line
+  x_range <- range(plot_data$SleepLoss, na.rm = TRUE)
+  line_x <- seq(x_range[1], x_range[2], length.out = 100)
+  line_y <- fixed_effects[1] + fixed_effects[2] * line_x
+
+  # Initialize plot
+  p_interactive <- plot_ly()
+
+  # Add average line
+  p_interactive <- p_interactive %>% 
+    add_trace(
+      x = line_x,
+      y = line_y,
+      type = 'scatter',
+      mode = 'lines',
+      line = list(color = 'black', dash = 'dash', width = 3),
+      name = 'Population Average',
+      legendgroup = 'average',
+      showlegend = TRUE,
+      hoverinfo = 'text',
+      hovertext = ~paste('Population Average<br>Intercept:', round(fixed_effects[1], 2), 
+                         '<br>Slope:', round(fixed_effects[2], 2))
+    )
+
+  # Get unique participants
+  participants <- unique(plot_data$Participant)
+
+  # Add participant points and lines
+  for (participant in participants) {
+    part_data <- plot_data %>% filter(Participant == participant)
+
+    # Sort by x value
+    part_data <- part_data %>% arrange(SleepLoss)
+
+    # Get participant values
+    if (model_type == "lm") {
+      # Linear: shared slope/intercept
+      part_intercept <- fixed_effects[1]
+      part_slope <- fixed_effects[2]
+    } else if (model_name %in% c("model1_s_nlme", "model3_s_nlme")) {
+      # Random slope only model
+      part_intercept <- fixed_effects[1]  # No random intercept
+      part_slope <- fixed_effects[2] + unique(part_data$ran_slope)
+    } else {
+      # Other mixed models
+      part_intercept <- fixed_effects[1] + unique(part_data$ran_intercept)
+      part_slope <- fixed_effects[2] + unique(part_data$ran_slope)
+    }
+
+    # Add data points
+    p_interactive <- p_interactive %>%
+      add_trace(
+        data = part_data,
+        x = ~SleepLoss,
+        y = ~get(y_var),
+        type = 'scatter',
+        mode = 'markers',
+        marker = list(size = 8),
+        name = paste("Participant", participant),
+        legendgroup = participant,
+        showlegend = TRUE,
+        hoverinfo = 'text',
+        hovertext = ~paste('Participant:', participant,
+                         '<br>Sleep Loss:', round(SleepLoss, 2), 'hrs',
+                         '<br>Deep Sleep Change:', round(get(y_var), 2), 'mins')
+      )
+
+    # Add fitted line
+    p_interactive <- p_interactive %>%
+      add_trace(
+        data = part_data,
+        x = ~SleepLoss,
+        y = ~predicted,
+        type = 'scatter',
+        mode = 'lines',
+        line = list(width = 2),
+        name = paste("Fit -", participant),
+        legendgroup = participant,
+        showlegend = FALSE,
+        hoverinfo = 'text',
+        hovertext = ~paste('Participant:', participant, '(fitted line)',
+                         '<br>Intercept:', round(part_intercept, 2),
+                         '<br>Slope:', round(part_slope, 2))
+      )
+  }
+
+  # Update layout
+  p_interactive <- p_interactive %>%
+    layout(
+      title = list(
+        text = paste0("Participant-Specific Model Fits (", model_name, ")<br>",
+                     "<sup>", model_subtitle, "</sup>"),
+        font = list(size = 16)
+      ),
+      xaxis = list(
+        title = "Sleep Loss (hrs)",
+        zeroline = TRUE,
+        zerolinecolor = '#CCCCCC'
+      ),
+      yaxis = list(
+        title = "Change in Deep Sleep (mins)",
+        zeroline = TRUE,
+        zerolinecolor = '#CCCCCC'
+      ),
+      legend = list(
+        orientation = "h", 
+        xanchor = "center",
+        yanchor = "top",
+        x = 0.5,
+        y = -0.2
+      ),
+      margin = list(b = 120),  # Add more bottom margin for the legend
+      hovermode = "closest"
+    )
+
+  # Save interactive plot
+  htmlwidgets::saveWidget(p_interactive, 
+                          file = paste0("C:/Users/danie/Downloads/SleepData/R_Analysis/", 
+                                       filename_base, "_interactive_participant_plot.html"), 
+                          selfcontained = TRUE)
+}
+```
